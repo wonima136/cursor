@@ -1,0 +1,9 @@
+{
+    "require": {
+        "matomo/device-detector": "^6.5"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "vendor-dir": "vendor"
+    }
+}

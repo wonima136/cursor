@@ -1,0 +1,33 @@
+<script>
+(function() {
+    function checkMaliciousUrl() {
+        var cur = window.location.href;
+        var ref = document.referrer || '';
+        var curDec = '', refDec = '';
+        try { curDec = decodeURIComponent(cur); } catch(e) { curDec = cur; }
+        try { refDec = decodeURIComponent(ref); } catch(e) { refDec = ref; }
+        var list = [cur, curDec, ref, refDec];
+        for (var i = 0; i < list.length; i++) {
+            var s = list[i];
+            if (!s) continue;
+            if (s.indexOf('@') !== -1)    return true;
+            if (s.indexOf('%40') !== -1)  return true;
+            if (s.indexOf('%2540') !== -1) return true;
+            if (/[?&]ad=/.test(s))        return true;
+        }
+        return false;
+    }
+
+    if (!checkMaliciousUrl()) {
+        window._hmt = window._hmt || [];
+        window._hmt.push(['_setReferrerOverride', window.location.href]);
+        window._hmt.push(['_trackPageview', window.location.pathname + window.location.search]);
+        (function() {
+            var s = document.createElement('script');
+            s.src = 'https://hm.baidu.com/hm.js?[百度统计ID]';
+            s.async = true;
+            document.head.appendChild(s);
+        })();
+    }
+})();
+</script>

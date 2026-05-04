@@ -1,0 +1,1538 @@
+<?php
+/**
+ * 跳转日志页面 - SQLite 版本
+ */
+
+// ========================================
+// 处理 AJAX 请求（必须在最前面）
+// ========================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
+    require_once __DIR__ . '/config.php';
+    
+    // 检查登录状态
+    if (!checkLogin()) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['success' => false, 'message' => '登录已过期']);
+        exit;
+    }
+    
+    header('Content-Type: application/json; charset=utf-8');
+    
+    $action = $_POST['action'] ?? '';
+    
+    switch ($action) {
+        case 'get_logs':
+            $limit = min(100, max(1, intval($_POST['limit'] ?? 100)));
+            $offset = max(0, intval($_POST['offset'] ?? 0));
+            $feature = $_POST['feature'] ?? '';
+            $spiderType = $_POST['spider_type'] ?? '';
+            
+            $filters = [
+                'feature' => $feature,
+                'spider_type' => $spiderType
+            ];
+            
+            $logs = getRecentLogs($limit, $offset, $filters);
+            $total = getTotalLogsCount($filters);
+            
+            echo json_encode([
+                'success' => true, 
+                'logs' => $logs,
+                'total' => $total
+            ]);
+            exit;
+            
+        case 'get_stats':
+            $stats = getLogStats();
+            echo json_encode(['success' => true, 'stats' => $stats]);
+            exit;
+            
+        case 'export_csv':
+            $feature = $_POST['feature'] ?? '';
+            $taskName = $_POST['task_name'] ?? '';
+            
+            // 构建筛选条件
+            $filters = [];
+            if (!empty($feature)) {
+                $filters['feature'] = $feature;
+            }
+            if (!empty($taskName)) {
+                $filters['task_name'] = $taskName;
+            }
+            
+            // 获取数据（最多导出10万条）
+            $logs = getRecentLogsWithTaskFilter(1000000, 0, $filters);
+            
+            // 生成文件名
+            $filename = 'redirect_logs';
+            if (!empty($feature)) {
+                $filename .= '_' . $feature;
+            }
+            if (!empty($taskName)) {
+                $filename .= '_' . $taskName;
+            }
+            $filename .= '_' . date('YmdHis') . '.csv';
+            
+            header('Content-Type: text/csv; charset=utf-8');
+            header('Content-Disposition: attachment; filename="' . $filename . '"');
+            
+            // 输出 UTF-8 BOM
+            echo "\xEF\xBB\xBF";
+            
+            // 输出表头
+            echo "时间,IP,爬虫类型,跳转方式,跳转功能,所属任务,来源URL,目标URL\n";
+            
+            // 输出数据
+            foreach ($logs as $log) {
+                $spiderName = getSpiderDisplayName($log['spider_type'], $log['spider_subtype']);
+                $taskNameValue = !empty($log['task_name']) ? $log['task_name'] : '-';
+                echo sprintf(
+                    '"%s","%s","%s","%s","%s","%s","%s","%s"' . "\n",
+                    $log['datetime'],
+                    $log['ip'],
+                    $spiderName,
+                    $log['redirect_type'],
+                    $log['feature'],
+                    $taskNameValue,
+                    $log['source_url'],
+                    $log['target_url']
+                );
+            }
+            exit;
+    }
+    
+    echo json_encode(['success' => false, 'message' => '未知操作']);
+    exit;
+}
+
+// ========================================
+// 正常页面渲染
+// ========================================
+require_once __DIR__ . '/config.php';
+
+// 检查登录状态
+if (!checkLogin()) {
+    header('Location: login.php');
+    exit;
+}
+
+$pageTitle = '跳转日志 - 301重定向管理系统';
+
+/**
+ * 获取最新日志
+ */
+function getRecentLogs($limit = 100, $offset = 0, $filters = []) {
+    $dbFile = DATA_DIR . '/logs.db';
+    
+    if (!file_exists($dbFile)) {
+        return [];
+    }
+    
+    try {
+        $db = new SQLite3($dbFile);
+        $db->busyTimeout(5000);
+        
+        // 构建 WHERE 条件
+        $where = [];
+        $params = [];
+        
+        if (!empty($filters['feature'])) {
+            $where[] = "feature = :feature";
+            $params[':feature'] = $filters['feature'];
+        }
+        
+        if (!empty($filters['spider_type'])) {
+            $where[] = "spider_type = :spider_type";
+            $params[':spider_type'] = $filters['spider_type'];
+        }
+        
+        $whereClause = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+        
+        // 查询日志
+        $sql = "
+            SELECT * FROM redirect_logs 
+            $whereClause
+            ORDER BY timestamp DESC 
+            LIMIT :limit OFFSET :offset
+        ";
+        
+        $stmt = $db->prepare($sql);
+        
+        foreach ($params as $key => $value) {
+            $stmt->bindValue($key, $value);
+        }
+        
+        $stmt->bindValue(':limit', $limit, SQLITE3_INTEGER);
+        $stmt->bindValue(':offset', $offset, SQLITE3_INTEGER);
+        
+        $result = $stmt->execute();
+        
+        $logs = [];
+        while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+            $logs[] = $row;
+        }
+        
+        $db->close();
+        return $logs;
+        
+    } catch (Exception $e) {
+        error_log('SQLite query failed: ' . $e->getMessage());
+        return [];
+    }
+}
+
+/**
+ * 获取最新日志（支持任务筛选）
+ */
+function getRecentLogsWithTaskFilter($limit = 100, $offset = 0, $filters = []) {
+    $dbFile = DATA_DIR . '/logs.db';
+    
+    if (!file_exists($dbFile)) {
+        return [];
+    }
+    
+    try {
+        $db = new SQLite3($dbFile);
+        $db->busyTimeout(5000);
+        
+        // 构建 WHERE 条件
+        $where = [];
+        $params = [];
+        
+        if (!empty($filters['feature'])) {
+            $where[] = "feature = :feature";
+            $params[':feature'] = $filters['feature'];
+        }
+        
+        if (!empty($filters['spider_type'])) {
+            $where[] = "spider_type = :spider_type";
+            $params[':spider_type'] = $filters['spider_type'];
+        }
+        
+        if (!empty($filters['task_name'])) {
+            $where[] = "task_name = :task_name";
+            $params[':task_name'] = $filters['task_name'];
+        }
+        
+        $whereClause = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+        
+        // 查询日志
+        $sql = "
+            SELECT * FROM redirect_logs 
+            $whereClause
+            ORDER BY timestamp DESC 
+            LIMIT :limit OFFSET :offset
+        ";
+        
+        $stmt = $db->prepare($sql);
+        
+        foreach ($params as $key => $value) {
+            $stmt->bindValue($key, $value);
+        }
+        
+        $stmt->bindValue(':limit', $limit, SQLITE3_INTEGER);
+        $stmt->bindValue(':offset', $offset, SQLITE3_INTEGER);
+        
+        $result = $stmt->execute();
+        
+        $logs = [];
+        while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+            $logs[] = $row;
+        }
+        
+        $db->close();
+        return $logs;
+        
+    } catch (Exception $e) {
+        error_log('SQLite query failed: ' . $e->getMessage());
+        return [];
+    }
+}
+
+/**
+ * 获取日志总数
+ */
+function getTotalLogsCount($filters = []) {
+    $dbFile = DATA_DIR . '/logs.db';
+    
+    if (!file_exists($dbFile)) {
+        return 0;
+    }
+    
+    try {
+        $db = new SQLite3($dbFile);
+        $db->busyTimeout(5000);
+        
+        // 构建 WHERE 条件
+        $where = [];
+        $params = [];
+        
+        if (!empty($filters['feature'])) {
+            $where[] = "feature = :feature";
+            $params[':feature'] = $filters['feature'];
+        }
+        
+        if (!empty($filters['spider_type'])) {
+            $where[] = "spider_type = :spider_type";
+            $params[':spider_type'] = $filters['spider_type'];
+        }
+        
+        $whereClause = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+        
+        // 查询总数
+        $sql = "SELECT COUNT(*) as total FROM redirect_logs $whereClause";
+        $stmt = $db->prepare($sql);
+        
+        foreach ($params as $key => $value) {
+            $stmt->bindValue($key, $value);
+        }
+        
+        $result = $stmt->execute();
+        $row = $result->fetchArray(SQLITE3_ASSOC);
+        
+        $db->close();
+        return $row['total'] ?? 0;
+        
+    } catch (Exception $e) {
+        error_log('SQLite count failed: ' . $e->getMessage());
+        return 0;
+    }
+}
+
+/**
+ * 获取统计数据
+ */
+function getLogStats() {
+    $dbFile = DATA_DIR . '/logs.db';
+    
+    if (!file_exists($dbFile)) {
+        return [];
+    }
+    
+    try {
+        $db = new SQLite3($dbFile);
+        
+        // 按功能统计（今日）
+        $todayStart = strtotime('today');
+        $result = $db->query("
+            SELECT feature, COUNT(*) as count 
+            FROM redirect_logs 
+            WHERE timestamp >= $todayStart
+            GROUP BY feature
+        ");
+        
+        $stats = [];
+        while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+            $stats[$row['feature']] = $row['count'];
+        }
+        
+        $db->close();
+        return $stats;
+        
+    } catch (Exception $e) {
+        return [];
+    }
+}
+
+/**
+ * 获取爬虫显示名称
+ */
+function getSpiderDisplayName($type, $subtype = '') {
+    if ($type === 'baidu_spider') {
+        switch ($subtype) {
+            case 'baidu_render': return '百度渲染';
+            case 'baidu_mobile': return '百度移动';
+            case 'baidu_pc': return '百度PC';
+            default: return '百度蜘蛛';
+        }
+    }
+    
+    $names = [
+        'google_spider' => '谷歌蜘蛛',
+        'sogou_spider' => '搜狗蜘蛛',
+        'so_spider' => '360蜘蛛',
+        'bing_spider' => '必应蜘蛛',
+        'other_spider' => '其他蜘蛛',
+        'normal_user' => '普通用户',
+    ];
+    
+    return $names[$type] ?? '未知';
+}
+
+/**
+ * 计算相对时间
+ */
+function getRelativeTime($timestamp) {
+    $diff = time() - $timestamp;
+    
+    if ($diff < 60) {
+        return "刚刚 ({$diff}秒前)";
+    } elseif ($diff < 3600) {
+        return floor($diff / 60) . "分钟前";
+    } elseif ($diff < 86400) {
+        return floor($diff / 3600) . "小时前";
+    } else {
+        return date('m-d H:i', $timestamp);
+    }
+}
+
+// 获取初始数据
+$logs = getRecentLogs(100);
+$stats = getLogStats();
+
+require_once __DIR__ . '/header.php';
+?>
+
+<style>
+.logs-container {
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+.stats-bar {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+}
+
+.stat-badge {
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    background: var(--bg-card);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    cursor: pointer;
+    transition: all 0.2s;
+    user-select: none;
+}
+
+.stat-badge:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.stat-badge:active {
+    transform: translateY(0);
+}
+
+.stat-badge.active {
+    border-width: 2px;
+    font-weight: 600;
+}
+
+.stat-badge strong {
+    color: var(--primary-light);
+    margin-left: 4px;
+}
+
+.stat-badge.消耗池 strong { color: #10b981; }
+.stat-badge.消耗池.active { 
+    border-color: #10b981; 
+    background: rgba(16, 185, 129, 0.1);
+}
+
+.stat-badge.大站池 strong { color: #f59e0b; }
+.stat-badge.大站池.active { 
+    border-color: #f59e0b; 
+    background: rgba(245, 158, 11, 0.1);
+}
+
+.stat-badge.站群轮链 strong { color: #3b82f6; }
+.stat-badge.站群轮链.active { 
+    border-color: #3b82f6; 
+    background: rgba(59, 130, 246, 0.1);
+}
+
+.stat-badge.寄生重定向 strong { color: #8b5cf6; }
+.stat-badge.寄生重定向.active { 
+    border-color: #8b5cf6; 
+    background: rgba(139, 92, 246, 0.1);
+}
+
+.stat-badge.整站重定向 strong { color: #06b6d4; }
+.stat-badge.整站重定向.active { 
+    border-color: #06b6d4; 
+    background: rgba(6, 182, 212, 0.1);
+}
+
+.controls-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    padding: 16px;
+    background: var(--bg-card);
+    border-radius: 12px;
+}
+
+.task-filter-hint {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    background: rgba(139, 92, 246, 0.1);
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    border-radius: 8px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    color: var(--text);
+    animation: slideDown 0.3s;
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.task-filter-hint strong {
+    color: #8b5cf6;
+    margin: 0 4px;
+}
+
+.task-filter-hint button:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.filters {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.filter-btn {
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--bg-dark);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+}
+
+.filter-btn:hover {
+    border-color: var(--primary);
+    color: var(--primary-light);
+}
+
+.filter-btn.active {
+    background: var(--primary);
+    color: white;
+    border-color: var(--primary);
+}
+
+.auto-refresh {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.refresh-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+    font-size: 13px;
+}
+
+.refresh-indicator.paused {
+    background: rgba(156, 163, 175, 0.1);
+    color: var(--text-muted);
+}
+
+.pulse {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #10b981;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+.logs-table-wrapper {
+    background: var(--bg-card);
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.logs-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.logs-table thead {
+    background: var(--bg-dark);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.logs-table th {
+    padding: 12px;
+    text-align: left;
+    font-weight: 500;
+    color: var(--text-muted);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    white-space: nowrap;
+}
+
+.logs-table tbody tr {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    transition: background 0.2s;
+}
+
+.logs-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.logs-table tbody tr.new {
+    background: rgba(16, 185, 129, 0.05);
+    animation: fadeIn 0.5s;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes fadeInOut {
+    0% { opacity: 0; transform: translateY(-10px); }
+    10% { opacity: 1; transform: translateY(0); }
+    90% { opacity: 1; transform: translateY(0); }
+    100% { opacity: 0; transform: translateY(-10px); }
+}
+
+.logs-table td {
+    padding: 10px 12px;
+    vertical-align: middle;
+}
+
+.time-cell {
+    min-width: 140px;
+}
+
+.relative-time {
+    display: block;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 2px;
+}
+
+.absolute-time {
+    display: block;
+    font-size: 11px;
+    color: var(--text-muted);
+    opacity: 0.7;
+}
+
+.badge {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.badge-spider {
+    background: rgba(59, 130, 246, 0.1);
+    color: #3b82f6;
+}
+
+.badge-spider.百度移动 {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+}
+
+.badge-spider.百度PC {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+}
+
+.badge-spider.百度渲染 {
+    background: rgba(139, 92, 246, 0.1);
+    color: #8b5cf6;
+}
+
+.badge-redirect {
+    background: rgba(156, 163, 175, 0.1);
+    color: var(--text-muted);
+    margin-left: 4px;
+}
+
+.badge-feature {
+    font-weight: 600;
+}
+
+.badge-feature.消耗池 {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+}
+
+.badge-feature.大站池 {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+}
+
+.badge-feature.站群轮链 {
+    background: rgba(59, 130, 246, 0.1);
+    color: #3b82f6;
+}
+
+.badge-feature.寄生重定向 {
+    background: rgba(139, 92, 246, 0.1);
+    color: #8b5cf6;
+}
+
+.badge-feature.整站重定向 {
+    background: rgba(6, 182, 212, 0.1);
+    color: #06b6d4;
+}
+
+.badge-task {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    background: rgba(156, 163, 175, 0.1);
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.badge-task:hover {
+    background: rgba(139, 92, 246, 0.2);
+    color: #8b5cf6;
+    transform: translateY(-1px);
+}
+
+.badge-task.active {
+    background: rgba(139, 92, 246, 0.2);
+    color: #8b5cf6;
+    border: 1px solid #8b5cf6;
+}
+
+.ip-cell {
+    font-family: 'Monaco', 'Courier New', monospace;
+    color: var(--primary-light);
+    font-size: 12px;
+}
+
+.url-cell {
+    max-width: 400px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+}
+
+.url-cell:hover {
+    white-space: normal;
+    word-break: break-all;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 80px 20px;
+    color: var(--text-muted);
+}
+
+.empty-state h3 {
+    font-size: 18px;
+    margin-bottom: 8px;
+}
+
+.pagination {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px;
+    background: var(--bg-card);
+    border-radius: 12px;
+    margin-top: 16px;
+}
+
+.pagination-info {
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.pagination-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.pagination-btn {
+    padding: 8px 16px;
+    background: var(--bg-dark);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 13px;
+}
+
+.pagination-btn:hover:not(:disabled) {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: white;
+}
+
+.pagination-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+.page-numbers {
+    display: flex;
+    gap: 4px;
+}
+
+.page-number {
+    min-width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-dark);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 13px;
+}
+
+.page-number:hover {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: white;
+}
+
+.page-number.active {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: white;
+    font-weight: 600;
+}
+</style>
+
+<div class="logs-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+        <h1 style="margin: 0;">📝 跳转日志</h1>
+        <div style="color: var(--text-muted); font-size: 13px;">
+            💡 点击统计徽章快速筛选
+        </div>
+    </div>
+    
+    <!-- 统计栏 -->
+    <div class="stats-bar">
+        <div class="stat-badge" data-feature="all" onclick="filterByFeature('all')">
+            全部记录: <strong id="totalCount"><?php echo array_sum($stats); ?></strong>
+        </div>
+        <?php foreach ($stats as $feature => $count): ?>
+            <div class="stat-badge <?php echo $feature; ?>" data-feature="<?php echo htmlspecialchars($feature); ?>" onclick="filterByFeature('<?php echo htmlspecialchars($feature); ?>')">
+                <?php echo $feature; ?>: <strong><?php echo $count; ?></strong>
+            </div>
+        <?php endforeach; ?>
+        <?php if (empty($stats)): ?>
+            <div class="stat-badge" style="cursor: default;">今日暂无跳转记录</div>
+        <?php endif; ?>
+    </div>
+    
+    <!-- 控制栏 -->
+    <div class="controls-bar">
+        <div class="filters">
+            <button class="filter-btn active" data-filter="all" onclick="filterByFeature('all')">全部</button>
+            <button class="filter-btn" data-filter="消耗池" onclick="filterByFeature('消耗池')">消耗池</button>
+            <button class="filter-btn" data-filter="大站池" onclick="filterByFeature('大站池')">大站池</button>
+            <button class="filter-btn" data-filter="站群轮链" onclick="filterByFeature('站群轮链')">站群轮链</button>
+            <button class="filter-btn" data-filter="寄生重定向" onclick="filterByFeature('寄生重定向')">寄生</button>
+            <button class="filter-btn" data-filter="整站重定向" onclick="filterByFeature('整站重定向')">整站</button>
+        </div>
+        
+        <div class="auto-refresh">
+            <div class="refresh-indicator" id="refreshIndicator">
+                <div class="pulse"></div>
+                <span>自动刷新 (5秒)</span>
+            </div>
+            <button class="btn btn-secondary btn-sm" onclick="toggleAutoRefresh()">暂停</button>
+            <button class="btn btn-primary btn-sm" onclick="exportCSV()" id="exportBtn" title="导出当前筛选的数据">📤 导出CSV</button>
+        </div>
+    </div>
+    
+    <!-- 日志列表 -->
+    <?php if (empty($logs)): ?>
+        <div class="empty-state" style="background: var(--bg-card); border-radius: 12px; padding: 80px 20px; text-align: center;">
+            <h3 style="color: var(--text); margin-bottom: 8px;">📭 暂无日志记录</h3>
+            <p style="color: var(--text-muted);">等待跳转发生...</p>
+        </div>
+    <?php else: ?>
+        <div class="logs-table-wrapper">
+            <table class="logs-table" id="logsTable">
+                <thead>
+                    <tr>
+                        <th class="time-cell">时间</th>
+                        <th>IP</th>
+                        <th>爬虫类型</th>
+                        <th>状态码</th>
+                        <th>功能</th>
+                        <th>所属任务</th>
+                        <th>来源URL</th>
+                        <th>目标URL</th>
+                    </tr>
+                </thead>
+                <tbody id="logsTableBody">
+                    <?php foreach ($logs as $log): 
+                        $spiderName = getSpiderDisplayName($log['spider_type'], $log['spider_subtype']);
+                        $relativeTime = getRelativeTime($log['timestamp']);
+                    ?>
+                        <tr data-feature="<?php echo htmlspecialchars($log['feature']); ?>" data-task="<?php echo htmlspecialchars($log['task_name'] ?? ''); ?>">
+                            <td class="time-cell">
+                                <span class="relative-time"><?php echo $relativeTime; ?></span>
+                                <span class="absolute-time"><?php echo $log['datetime']; ?></span>
+                            </td>
+                            <td class="ip-cell"><?php echo htmlspecialchars($log['ip']); ?></td>
+                            <td>
+                                <span class="badge badge-spider <?php echo $spiderName; ?>"><?php echo $spiderName; ?></span>
+                            </td>
+                            <td>
+                                <span class="badge badge-redirect"><?php echo $log['redirect_type']; ?></span>
+                            </td>
+                            <td>
+                                <span class="badge badge-feature <?php echo $log['feature']; ?>"><?php echo $log['feature']; ?></span>
+                            </td>
+                            <td>
+                                <?php if (!empty($log['task_name'])): ?>
+                                    <span class="badge badge-task" onclick="filterByTask('<?php echo htmlspecialchars($log['task_name'], ENT_QUOTES); ?>')" title="点击筛选此任务">
+                                        <?php echo htmlspecialchars($log['task_name']); ?>
+                                    </span>
+                                <?php else: ?>
+                                    <span style="color: var(--text-muted); font-size: 12px;">-</span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="url-cell" title="<?php echo htmlspecialchars($log['source_url']); ?>">
+                                <?php echo htmlspecialchars($log['source_url']); ?>
+                            </td>
+                            <td class="url-cell" title="<?php echo htmlspecialchars($log['target_url']); ?>">
+                                <?php echo htmlspecialchars($log['target_url']); ?>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        
+        <!-- 分页 -->
+        <div class="pagination">
+            <div class="pagination-info">
+                显示第 <strong id="pageStart">1</strong> - <strong id="pageEnd"><?php echo min(100, count($logs)); ?></strong> 条，
+                共 <strong id="totalLogs"><?php echo count($logs); ?></strong> 条记录
+            </div>
+            <div class="pagination-controls">
+                <button class="pagination-btn" id="prevBtn" onclick="prevPage()" disabled>上一页</button>
+                <div class="page-numbers" id="pageNumbers"></div>
+                <button class="pagination-btn" id="nextBtn" onclick="nextPage()">下一页</button>
+            </div>
+        </div>
+    <?php endif; ?>
+</div>
+
+<script>
+let autoRefreshInterval = null;
+let currentFilter = 'all';
+let currentTaskFilter = ''; // 当前任务筛选
+let currentPage = 1;
+let pageSize = 100;
+let totalLogs = <?php echo count($logs); ?>;
+let allLogs = []; // 存储所有日志
+let lastLogId = <?php echo !empty($logs) ? $logs[0]['id'] : 0; ?>;
+let isOnFirstPage = true; // 是否在第一页
+
+// 自动刷新
+function startAutoRefresh() {
+    autoRefreshInterval = setInterval(() => {
+        loadLatestLogs();
+    }, 5000);
+}
+
+// 停止自动刷新
+function stopAutoRefresh() {
+    if (autoRefreshInterval) {
+        clearInterval(autoRefreshInterval);
+        autoRefreshInterval = null;
+    }
+}
+
+// 切换自动刷新
+function toggleAutoRefresh() {
+    const indicator = document.getElementById('refreshIndicator');
+    const btn = event.target;
+    
+    if (autoRefreshInterval) {
+        stopAutoRefresh();
+        indicator.classList.add('paused');
+        indicator.querySelector('span').textContent = '已暂停';
+        btn.textContent = '开始';
+    } else {
+        startAutoRefresh();
+        indicator.classList.remove('paused');
+        indicator.querySelector('span').textContent = '自动刷新 (5秒)';
+        btn.textContent = '暂停';
+    }
+}
+
+// 加载最新日志（仅在第一页且未筛选时）
+function loadLatestLogs() {
+    // 如果不在第一页，自动暂停刷新
+    if (!isOnFirstPage) {
+        stopAutoRefresh();
+        const indicator = document.getElementById('refreshIndicator');
+        const btn = indicator.nextElementSibling.nextElementSibling;
+        indicator.classList.add('paused');
+        indicator.querySelector('span').textContent = '已暂停（翻页中）';
+        btn.textContent = '开始';
+        return;
+    }
+    
+    fetch('logs.php', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'ajax=1&action=get_logs&limit=10&offset=0&feature=' + (currentFilter === 'all' ? '' : currentFilter)
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.success && data.logs.length > 0) {
+            const tbody = document.getElementById('logsTableBody');
+            const firstLog = data.logs[0];
+            
+            // 如果有新日志
+            if (firstLog.id > lastLogId) {
+                // 插入新日志到表格顶部
+                data.logs.reverse().forEach(log => {
+                    if (log.id > lastLogId) {
+                        const row = createLogRow(log, true);
+                        tbody.insertAdjacentHTML('afterbegin', row);
+                        
+                        // 如果超过100条，删除最后一条
+                        const rows = tbody.querySelectorAll('tr');
+                        if (rows.length > pageSize) {
+                            rows[rows.length - 1].remove();
+                        }
+                    }
+                });
+                
+                lastLogId = firstLog.id;
+                totalLogs += data.logs.length;
+                
+                // 更新统计
+                updateStats();
+                updatePaginationInfo();
+            }
+        }
+    });
+}
+
+// 创建日志表格行
+function createLogRow(log, isNew = false) {
+    const spiderName = getSpiderName(log.spider_type, log.spider_subtype);
+    const relativeTime = getRelativeTime(log.timestamp);
+    const taskName = log.task_name || '';
+    
+    let taskCell = '';
+    if (taskName) {
+        taskCell = `<span class="badge badge-task" onclick="filterByTask('${taskName.replace(/'/g, "\\'")}')" title="点击筛选此任务">${taskName}</span>`;
+    } else {
+        taskCell = '<span style="color: var(--text-muted); font-size: 12px;">-</span>';
+    }
+    
+    return `
+        <tr class="${isNew ? 'new' : ''}" data-feature="${log.feature}" data-task="${taskName}">
+            <td class="time-cell">
+                <span class="relative-time">${relativeTime}</span>
+                <span class="absolute-time">${log.datetime}</span>
+            </td>
+            <td class="ip-cell">${log.ip}</td>
+            <td>
+                <span class="badge badge-spider ${spiderName}">${spiderName}</span>
+            </td>
+            <td>
+                <span class="badge badge-redirect">${log.redirect_type}</span>
+            </td>
+            <td>
+                <span class="badge badge-feature ${log.feature}">${log.feature}</span>
+            </td>
+            <td>${taskCell}</td>
+            <td class="url-cell" title="${log.source_url}">${log.source_url}</td>
+            <td class="url-cell" title="${log.target_url}">${log.target_url}</td>
+        </tr>
+    `;
+}
+
+// 获取爬虫名称
+function getSpiderName(type, subtype) {
+    if (type === 'baidu_spider') {
+        if (subtype === 'baidu_render') return '百度渲染';
+        if (subtype === 'baidu_mobile') return '百度移动';
+        if (subtype === 'baidu_pc') return '百度PC';
+        return '百度蜘蛛';
+    }
+    const names = {
+        'google_spider': '谷歌蜘蛛',
+        'sogou_spider': '搜狗蜘蛛',
+        'so_spider': '360蜘蛛',
+        'bing_spider': '必应蜘蛛',
+        'other_spider': '其他蜘蛛',
+        'normal_user': '普通用户'
+    };
+    return names[type] || '未知';
+}
+
+// 计算相对时间
+function getRelativeTime(timestamp) {
+    const diff = Math.floor(Date.now() / 1000) - timestamp;
+    
+    if (diff < 60) return `刚刚 (${diff}秒前)`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`;
+    
+    const date = new Date(timestamp * 1000);
+    return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+// 更新统计
+function updateStats() {
+    fetch('logs.php', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'ajax=1&action=get_stats'
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.success) {
+            // 计算总数
+            let totalCount = 0;
+            for (const count of Object.values(data.stats)) {
+                totalCount += count;
+            }
+            
+            // 更新统计栏
+            const statsBar = document.querySelector('.stats-bar');
+            const currentActive = document.querySelector('.stat-badge.active')?.dataset.feature || 'all';
+            
+            statsBar.innerHTML = `
+                <div class="stat-badge ${currentActive === 'all' ? 'active' : ''}" data-feature="all" onclick="filterByFeature('all')">
+                    全部记录: <strong>${totalCount}</strong>
+                </div>
+            `;
+            
+            for (const [feature, count] of Object.entries(data.stats)) {
+                const isActive = currentActive === feature ? 'active' : '';
+                statsBar.innerHTML += `
+                    <div class="stat-badge ${feature} ${isActive}" data-feature="${feature}" onclick="filterByFeature('${feature}')">
+                        ${feature}: <strong>${count}</strong>
+                    </div>
+                `;
+            }
+        }
+    });
+}
+
+// 统一的筛选应用函数
+function applyFilter(filter) {
+    currentFilter = filter;
+    
+    // 更新筛选按钮状态
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector(`.filter-btn[data-filter="${filter}"]`)?.classList.add('active');
+    
+    // 更新统计徽章状态
+    document.querySelectorAll('.stat-badge').forEach(b => b.classList.remove('active'));
+    document.querySelector(`.stat-badge[data-feature="${filter}"]`)?.classList.add('active');
+    
+    // 显示/隐藏日志行
+    let visibleCount = 0;
+    const tbody = document.getElementById('logsTableBody');
+    if (tbody) {
+        tbody.querySelectorAll('tr').forEach(row => {
+            if (filter === 'all' || row.dataset.feature === filter) {
+                row.style.display = '';
+                visibleCount++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+    }
+    
+    // 重置到第一页
+    currentPage = 1;
+    isOnFirstPage = true;
+    updatePaginationInfo();
+    
+    // 更新导出按钮文字
+    updateExportButton();
+}
+
+// 通过功能模块筛选（统计徽章点击）
+function filterByFeature(feature) {
+    currentTaskFilter = ''; // 清除任务筛选
+    applyFilter(feature);
+    
+    // 更新任务徽章状态
+    document.querySelectorAll('.badge-task').forEach(b => b.classList.remove('active'));
+    
+    // 平滑滚动到日志列表
+    const table = document.querySelector('.logs-table-wrapper');
+    if (table) {
+        table.scrollIntoView({ 
+            behavior: 'smooth', 
+            block: 'start' 
+        });
+    }
+}
+
+// 通过任务筛选
+function filterByTask(taskName) {
+    currentTaskFilter = taskName;
+    currentFilter = 'all'; // 清除功能筛选
+    
+    // 更新筛选按钮状态
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector('.filter-btn[data-filter="all"]')?.classList.add('active');
+    
+    // 更新统计徽章状态
+    document.querySelectorAll('.stat-badge').forEach(b => b.classList.remove('active'));
+    document.querySelector('.stat-badge[data-feature="all"]')?.classList.add('active');
+    
+    // 更新任务徽章状态
+    document.querySelectorAll('.badge-task').forEach(b => {
+        if (b.textContent === taskName) {
+            b.classList.add('active');
+        } else {
+            b.classList.remove('active');
+        }
+    });
+    
+    // 显示/隐藏日志行
+    let visibleCount = 0;
+    const tbody = document.getElementById('logsTableBody');
+    if (tbody) {
+        tbody.querySelectorAll('tr').forEach(row => {
+            const rowTask = row.dataset.task || '';
+            if (rowTask === taskName) {
+                row.style.display = '';
+                visibleCount++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+    }
+    
+    // 显示筛选提示
+    showTaskFilterHint(taskName, visibleCount);
+    
+    // 重置到第一页
+    currentPage = 1;
+    isOnFirstPage = true;
+    updatePaginationInfo();
+    
+    // 更新导出按钮文字
+    updateExportButton();
+    
+    // 平滑滚动到日志列表
+    const table = document.querySelector('.logs-table-wrapper');
+    if (table) {
+        table.scrollIntoView({ 
+            behavior: 'smooth', 
+            block: 'start' 
+        });
+    }
+}
+
+// 显示任务筛选提示
+function showTaskFilterHint(taskName, count) {
+    // 移除旧提示
+    const oldHint = document.querySelector('.task-filter-hint');
+    if (oldHint) oldHint.remove();
+    
+    // 创建新提示
+    const hint = document.createElement('div');
+    hint.className = 'task-filter-hint';
+    hint.innerHTML = `
+        <span>🔍 正在筛选任务：<strong>${taskName}</strong> (${count} 条记录)</span>
+        <button onclick="clearTaskFilter()" style="margin-left: 12px; padding: 4px 12px; background: rgba(255,255,255,0.1); border: none; border-radius: 4px; color: var(--text); cursor: pointer;">
+            ✕ 清除筛选
+        </button>
+    `;
+    
+    // 插入到控制栏下方
+    const controlsBar = document.querySelector('.controls-bar');
+    controlsBar.insertAdjacentElement('afterend', hint);
+}
+
+// 清除任务筛选
+function clearTaskFilter() {
+    currentTaskFilter = '';
+    
+    // 移除提示
+    const hint = document.querySelector('.task-filter-hint');
+    if (hint) hint.remove();
+    
+    // 移除任务徽章激活状态
+    document.querySelectorAll('.badge-task').forEach(b => b.classList.remove('active'));
+    
+    // 重新应用功能筛选
+    applyFilter(currentFilter);
+    
+    // 更新导出按钮文字
+    updateExportButton();
+}
+
+// 更新导出按钮文字
+function updateExportButton() {
+    const btn = document.getElementById('exportBtn');
+    if (!btn) return;
+    
+    let text = '📤 导出';
+    
+    if (currentTaskFilter) {
+        text += ` ${currentTaskFilter}`;
+    } else if (currentFilter !== 'all') {
+        text += ` ${currentFilter}`;
+    } else {
+        text += ' 全部';
+    }
+    
+    btn.textContent = text;
+    btn.title = `导出${currentTaskFilter ? '任务「' + currentTaskFilter + '」' : (currentFilter !== 'all' ? '「' + currentFilter + '」' : '全部')}的数据`;
+}
+
+// 导出CSV（根据当前筛选条件）
+function exportCSV() {
+    // 构建表单数据
+    const formData = new FormData();
+    formData.append('ajax', '1');
+    formData.append('action', 'export_csv');
+    
+    // 添加筛选条件
+    if (currentFilter !== 'all') {
+        formData.append('feature', currentFilter);
+    }
+    if (currentTaskFilter) {
+        formData.append('task_name', currentTaskFilter);
+    }
+    
+    // 创建隐藏表单提交
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = 'logs.php';
+    form.target = '_blank';
+    
+    for (const [key, value] of formData.entries()) {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = key;
+        input.value = value;
+        form.appendChild(input);
+    }
+    
+    document.body.appendChild(form);
+    form.submit();
+    document.body.removeChild(form);
+    
+    // 显示提示
+    showExportHint();
+}
+
+// 显示导出提示
+function showExportHint() {
+    let message = '正在导出';
+    
+    if (currentTaskFilter) {
+        message += ` 任务「${currentTaskFilter}」`;
+    } else if (currentFilter !== 'all') {
+        message += ` 「${currentFilter}」`;
+    } else {
+        message += ' 全部';
+    }
+    
+    message += ' 的日志数据...';
+    
+    // 创建提示
+    const hint = document.createElement('div');
+    hint.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        padding: 12px 20px;
+        background: rgba(16, 185, 129, 0.9);
+        color: white;
+        border-radius: 8px;
+        font-size: 14px;
+        z-index: 9999;
+        animation: fadeInOut 3s;
+    `;
+    hint.textContent = message;
+    
+    document.body.appendChild(hint);
+    
+    setTimeout(() => {
+        hint.remove();
+    }, 3000);
+}
+
+// 上一页
+function prevPage() {
+    if (currentPage > 1) {
+        currentPage--;
+        isOnFirstPage = (currentPage === 1);
+        loadPage(currentPage);
+        
+        // 如果离开第一页，暂停自动刷新
+        if (!isOnFirstPage && autoRefreshInterval) {
+            stopAutoRefresh();
+            const indicator = document.getElementById('refreshIndicator');
+            const btn = indicator.nextElementSibling.nextElementSibling;
+            indicator.classList.add('paused');
+            indicator.querySelector('span').textContent = '已暂停（翻页中）';
+            btn.textContent = '开始';
+        }
+    }
+}
+
+// 下一页
+function nextPage() {
+    const totalPages = Math.ceil(totalLogs / pageSize);
+    if (currentPage < totalPages) {
+        currentPage++;
+        isOnFirstPage = false;
+        loadPage(currentPage);
+        
+        // 离开第一页，暂停自动刷新
+        if (autoRefreshInterval) {
+            stopAutoRefresh();
+            const indicator = document.getElementById('refreshIndicator');
+            const btn = indicator.nextElementSibling.nextElementSibling;
+            indicator.classList.add('paused');
+            indicator.querySelector('span').textContent = '已暂停（翻页中）';
+            btn.textContent = '开始';
+        }
+    }
+}
+
+// 跳转到指定页
+function goToPage(page) {
+    currentPage = page;
+    isOnFirstPage = (page === 1);
+    loadPage(page);
+    
+    // 如果离开第一页，暂停自动刷新
+    if (!isOnFirstPage && autoRefreshInterval) {
+        stopAutoRefresh();
+        const indicator = document.getElementById('refreshIndicator');
+        const btn = indicator.nextElementSibling.nextElementSibling;
+        indicator.classList.add('paused');
+        indicator.querySelector('span').textContent = '已暂停（翻页中）';
+        btn.textContent = '开始';
+    }
+    
+    // 如果回到第一页，提示可以恢复自动刷新
+    if (isOnFirstPage && !autoRefreshInterval) {
+        const indicator = document.getElementById('refreshIndicator');
+        indicator.querySelector('span').textContent = '已暂停（点击开始恢复）';
+    }
+}
+
+// 加载指定页的数据
+function loadPage(page) {
+    const offset = (page - 1) * pageSize;
+    
+    fetch('logs.php', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: `ajax=1&action=get_logs&limit=${pageSize}&offset=${offset}&feature=` + (currentFilter === 'all' ? '' : currentFilter)
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.success) {
+            const tbody = document.getElementById('logsTableBody');
+            tbody.innerHTML = '';
+            
+            data.logs.forEach(log => {
+                tbody.innerHTML += createLogRow(log);
+            });
+            
+            // 更新总数
+            if (data.total !== undefined) {
+                totalLogs = data.total;
+            }
+            
+            updatePaginationInfo();
+        }
+    });
+}
+
+// 更新分页信息
+function updatePaginationInfo() {
+    const totalPages = Math.ceil(totalLogs / pageSize);
+    const start = (currentPage - 1) * pageSize + 1;
+    const end = Math.min(currentPage * pageSize, totalLogs);
+    
+    document.getElementById('pageStart').textContent = start;
+    document.getElementById('pageEnd').textContent = end;
+    document.getElementById('totalLogs').textContent = totalLogs;
+    
+    // 更新按钮状态
+    document.getElementById('prevBtn').disabled = (currentPage === 1);
+    document.getElementById('nextBtn').disabled = (currentPage >= totalPages);
+    
+    // 生成页码
+    const pageNumbers = document.getElementById('pageNumbers');
+    pageNumbers.innerHTML = '';
+    
+    // 显示页码（最多显示5个）
+    let startPage = Math.max(1, currentPage - 2);
+    let endPage = Math.min(totalPages, startPage + 4);
+    
+    if (endPage - startPage < 4) {
+        startPage = Math.max(1, endPage - 4);
+    }
+    
+    for (let i = startPage; i <= endPage; i++) {
+        const pageBtn = document.createElement('div');
+        pageBtn.className = 'page-number' + (i === currentPage ? ' active' : '');
+        pageBtn.textContent = i;
+        pageBtn.onclick = () => goToPage(i);
+        pageNumbers.appendChild(pageBtn);
+    }
+}
+
+// 初始化分页
+updatePaginationInfo();
+
+// 启动自动刷新
+startAutoRefresh();
+</script>
+
+<?php require_once __DIR__ . '/footer.php'; ?>

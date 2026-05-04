@@ -1,0 +1,5 @@
+WAF 接入方式
+
+1. 页面头部引入（单页面）
+require_once $_SERVER['DOCUMENT_ROOT'] . '/ad_seo/config.php';
+
