@@ -1,0 +1,207 @@
+:root {
+  --sidebar-w: 220px;
+  --sidebar-bg: #1a1d23;
+  --sidebar-hover: #2a2d36;
+  --sidebar-active: #3b5bdb;
+  --topbar-h: 56px;
+  --text-muted-sidebar: #8891a4;
+}
+
+body { background: #f4f6fb; font-size: 0.9rem; }
+
+/* ── 侧边栏 ── */
+#sidebar {
+  width: var(--sidebar-w);
+  min-height: 100vh;
+  background: var(--sidebar-bg);
+  position: fixed;
+  top: 0; left: 0;
+  display: flex;
+  flex-direction: column;
+  z-index: 100;
+  flex-shrink: 0;
+}
+
+.sidebar-brand {
+  height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px;
+  color: #fff;
+  font-size: 1.1rem;
+  font-weight: 700;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.sidebar-nav { padding: 12px 0; flex: 1; overflow-y: auto; }
+
+.nav-section {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted-sidebar);
+  padding: 16px 20px 6px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 20px;
+  color: #c1c8d4;
+  text-decoration: none;
+  border-radius: 0;
+  transition: background 0.15s, color 0.15s;
+  font-size: 0.875rem;
+}
+.nav-item:hover  { background: var(--sidebar-hover); color: #fff; }
+.nav-item.active { background: var(--sidebar-active); color: #fff; }
+.nav-item i      { font-size: 1rem; opacity: 0.8; }
+
+/* ── 主内容 ── */
+#content {
+  margin-left: var(--sidebar-w);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  width: calc(100% - var(--sidebar-w));
+}
+
+.topbar {
+  height: var(--topbar-h);
+  background: #fff;
+  border-bottom: 1px solid #e8ecf0;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.main-body { flex: 1; }
+
+/* ── 统计卡片 ── */
+.stat-card {
+  background: #fff;
+  border-radius: 10px;
+  padding: 20px;
+  border: 1px solid #e8ecf0;
+  transition: box-shadow 0.2s;
+}
+.stat-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
+.stat-num { font-size: 2rem; font-weight: 700; line-height: 1; }
+.stat-label { font-size: 0.8rem; color: #6c757d; margin-top: 4px; }
+
+/* ── 筛选栏 ── */
+.filter-bar {
+  background: #fff;
+  border: 1px solid #e8ecf0;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+/* ── 表格 ── */
+.table-card {
+  background: #fff;
+  border-radius: 10px;
+  border: 1px solid #e8ecf0;
+  overflow: hidden;
+}
+.table { margin-bottom: 0; }
+.table th {
+  background: #f8f9fc;
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6c757d;
+  border-bottom: 2px solid #e8ecf0;
+  white-space: nowrap;
+  padding: 10px 12px;
+}
+.table td { vertical-align: middle; padding: 10px 12px; }
+.table tbody tr:hover { background: #f8f9fc; }
+
+.domain-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: #2c3e50;
+  text-decoration: none;
+}
+.domain-name:hover { color: var(--sidebar-active); }
+
+/* ── 标签 ── */
+.tag-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  margin: 1px;
+  color: #fff;
+}
+
+/* ── 批量操作栏 ── */
+#batch-bar {
+  display: none;
+  background: #3b5bdb;
+  color: #fff;
+  border-radius: 8px;
+  padding: 10px 16px;
+}
+
+/* ── 档案时间线 ── */
+.timeline { position: relative; padding-left: 28px; }
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 9px; top: 0; bottom: 0;
+  width: 2px;
+  background: #e8ecf0;
+}
+.timeline-item { position: relative; margin-bottom: 20px; }
+.timeline-dot {
+  position: absolute;
+  left: -23px;
+  top: 3px;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #3b5bdb;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 2px #3b5bdb;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 8px; color: #fff;
+}
+.timeline-time { font-size: 0.75rem; color: #9aa3b0; }
+.timeline-content {
+  background: #f8f9fc;
+  border-radius: 8px;
+  padding: 10px 14px;
+  border: 1px solid #e8ecf0;
+  margin-top: 4px;
+}
+
+/* ── 分页 ── */
+.pagination { margin-bottom: 0; }
+.page-link { color: var(--sidebar-active); }
+.page-item.active .page-link {
+  background-color: var(--sidebar-active);
+  border-color: var(--sidebar-active);
+}
+
+/* ── 表单 ── */
+.form-card {
+  background: #fff;
+  border-radius: 10px;
+  border: 1px solid #e8ecf0;
+  padding: 24px;
+}
+.section-title {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6c757d;
+  font-weight: 600;
+  border-bottom: 1px solid #e8ecf0;
+  padding-bottom: 8px;
+  margin-bottom: 16px;
+}
